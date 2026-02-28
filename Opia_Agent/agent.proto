@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package agent;
+
+// Merkezdeki .NET (veya geçici test) sunucusunun sunacağı servis
+service ServerManager {
+  // Ajanın merkeze periyodik olarak metrik gönderdiği metot (Push)
+  rpc PushMetrics (SystemMetrics) returns (MetricResponse) {}
+
+  // İleride uzaktan komut çalıştırmak (Ansible mantığı) için Çift Yönlü Akış
+  rpc CommandStream (stream CommandResult) returns (stream CommandRequest) {}
+}
+
+// Ajanın merkeze göndereceği metrikler
+message SystemMetrics {
+  string server_id = 1; // Gelen verinin hangi sunucuya ait olduğunu bilmek için
+  double cpu_usage_percent = 2;
+  double memory_usage_percent = 3;
+}
+
+// Merkezin ajana vereceği onay yanıtı
+message MetricResponse {
+  bool success = 1;
+}
+
+// --- İleride kullanılacak uzaktan komut çalıştırma yapıları ---
+message CommandRequest {
+  string command_id = 1;
+  string command = 2;
+}
+
+message CommandResult {
+  string server_id = 1;
+  string command_id = 2;
+  string output = 3;
+  int32 exit_code = 4;
+}
