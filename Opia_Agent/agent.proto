@@ -7,20 +7,31 @@ service ServerManager {
   rpc CommandStream (stream CommandResult) returns (stream CommandRequest) {}
 }
 
-// Yeni eklenen Container veri yapısı
 message ContainerInfo {
   string container_id = 1;
   string name = 2;
-  string state = 3;   // running, exited, paused vb.
-  string health = 4;  // healthy, unhealthy (eğer healthcheck varsa)
+  string state = 3;
+  string health = 4;
+}
+
+// Yeni: Sistem servislerinin durumunu tutacak yapı
+message ServiceInfo {
+  string name = 1;
+  string status = 2; // "active", "inactive", "failed" vb.
+}
+
+// Yeni: Sistem hata loglarını tutacak yapı
+message ErrorLog {
+  string log_message = 1;
 }
 
 message SystemMetrics {
   string server_id = 1;
   double cpu_usage_percent = 2;
   double memory_usage_percent = 3;
-  // Container'ların listesini tutacak dizi (repeated)
-  repeated ContainerInfo containers = 4; 
+  repeated ContainerInfo containers = 4;
+  repeated ServiceInfo services = 5; // Yeni eklenen
+  repeated ErrorLog error_logs = 6;  // Yeni eklenen
 }
 
 message MetricResponse {
