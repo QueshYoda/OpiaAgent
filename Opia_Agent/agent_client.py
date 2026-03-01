@@ -6,7 +6,7 @@ import docker
 import agent_pb2
 import agent_pb2_grpc
 
-SERVER_ADDRESS = '192.168.0.100:50051' # .NET sunucusunun adresi
+SERVER_ADDRESS = '192.168.0.100:5054' # .NET sunucusunun adresi
 SERVER_ID = 'fedora-node-01'
 
 # Docker daemon'una bağlan (Arka planda /var/run/docker.sock kullanır)
