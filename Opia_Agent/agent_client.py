@@ -91,11 +91,22 @@ def push_metrics(stub):
                     if c.status == 'running':
                         stats = c.stats(stream=False) # Anlık stat çek
                         
-                        # Docker CPU formülü
-                        cpu_delta = stats['cpu_stats']['cpu_usage']['total_usage'] - stats['precpu_stats']['cpu_usage']['total_usage']
-                        system_cpu_delta = stats['cpu_stats']['system_cpu_usage'] - stats['precpu_stats']['system_cpu_usage']
-                        if system_cpu_delta > 0.0 and cpu_delta > 0.0:
-                            cpu_perc = (cpu_delta / system_cpu_delta) * len(stats['cpu_stats']['cpu_usage']['percpu_usage']) * 100.0
+                        # Docker CPU formülü (cgroups v1 ve v2 uyumlu)
+                        cpu_delta = stats['cpu_stats']['cpu_usage']['total_usage'] - stats['precpu_stats']['cpu_usage'].get('total_usage', 0)
+                        
+                        system_cpu_usage = stats['cpu_stats'].get('system_cpu_usage')
+                        precpu_system_cpu_usage = stats['precpu_stats'].get('system_cpu_usage')
+                        
+                        if system_cpu_usage is not None and precpu_system_cpu_usage is not None:
+                            system_cpu_delta = system_cpu_usage - precpu_system_cpu_usage
+                            if system_cpu_delta > 0.0 and cpu_delta > 0.0:
+                                # cgroups v2'de 'online_cpus' vardır, yoksa 'percpu_usage' uzunluğuna bakar, o da yoksa 1 sayar.
+                                online_cpus = stats['cpu_stats'].get('online_cpus')
+                                if online_cpus is None:
+                                    percpu_usage = stats['cpu_stats']['cpu_usage'].get('percpu_usage')
+                                    online_cpus = len(percpu_usage) if percpu_usage else 1
+                                
+                                cpu_perc = (cpu_delta / system_cpu_delta) * online_cpus * 100.0
                         
                         mem_mb = stats['memory_stats']['usage'] / (1024 * 1024)
 
