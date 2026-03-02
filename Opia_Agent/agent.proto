@@ -6,24 +6,33 @@ service ServerManager {
   rpc CommandStream (stream CommandResult) returns (stream CommandRequest) {}
 }
 
+// YENİ: Cloudflare için özel detaylı yapı
+message CloudflareInfo {
+  double total_requests = 1;
+  double successful_requests = 2; // HTTP 200
+  double server_errors = 3;       // HTTP 500
+  double active_sessions = 4;
+  double latency_ms = 5;          // Ping/Gecikme
+  double bytes_received = 6;      // İndirme
+  double bytes_sent = 7;          // Yükleme
+}
+
 message ContainerInfo {
   string container_id = 1;
   string name = 2;
   string state = 3;
   string health = 4;
-  double cpu_percent = 5;      // YENİ: Container CPU
-  double memory_mb = 6;        // YENİ: Container RAM (Megabyte)
+  double cpu_percent = 5;
+  double memory_mb = 6;
 }
 
-// Yeni: Sistem servislerinin durumunu tutacak yapı
 message ServiceInfo {
   string name = 1;
   string status = 2;
-  double cpu_percent = 3;      // YENİ: Servis CPU
-  double memory_mb = 4;        // YENİ: Servis RAM (Megabyte)
+  double cpu_percent = 3;
+  double memory_mb = 4;
 }
 
-// Yeni: Sistem hata loglarını tutacak yapı
 message ErrorLog {
   string log_message = 1;
 }
@@ -32,7 +41,8 @@ message SystemMetrics {
   string server_id = 1;
   double cpu_usage_percent = 2;
   double memory_usage_percent = 3;
-  double cf_tunnel_requests = 4; 
+  // cf_tunnel_requests alanını SİLDİK, yerine bu nesneyi koyduk:
+  CloudflareInfo cloudflare = 4; 
   repeated ContainerInfo containers = 5;
   repeated ServiceInfo services = 6;
   repeated ErrorLog error_logs = 7;

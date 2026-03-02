@@ -8,16 +8,20 @@ import urllib.request
 import agent_pb2
 import agent_pb2_grpc
 
+# Sunucu adresi ve Ajan kimliği (Kendi yapına göre kontrol et)
 SERVER_ADDRESS = '192.168.0.100:5054' 
 SERVER_ID = 'fedora-node-01'
 
-# cloudflared'i de izleme listemize aldık
+# İzleme listemizdeki kritik servisler
 TARGET_SERVICES = ['jenkins', 'postgresql', 'cloudflared'] 
 
+# Ajanın hafızası (Sadece değişen verileri algılamak için önceki durumları tutar)
 LAST_SERVICES_STATE = []
 LAST_ERRORS_STATE = []
 LAST_CONTAINERS_STATE = []
+LAST_CLOUDFLARE_STATE = None # YENİ: Cloudflare hafızası
 
+# Docker daemon bağlantısı
 try:
     docker_client = docker.from_env()
 except Exception:
@@ -29,12 +33,10 @@ def get_service_metrics(service_name):
     cpu = 0.0
     mem_mb = 0.0
     try:
-        # Önce servisin durumunu al
         res_status = subprocess.run(['systemctl', 'is-active', service_name], capture_output=True, text=True)
         status = res_status.stdout.strip()
         
         if status == "active":
-            # Servisin Ana İşlem ID'sini (PID) bul
             res_pid = subprocess.run(['systemctl', 'show', '-p', 'MainPID', '--value', service_name], capture_output=True, text=True)
             pid_str = res_pid.stdout.strip()
             
@@ -47,20 +49,42 @@ def get_service_metrics(service_name):
     
     return status, round(cpu, 2), round(mem_mb, 2)
 
-def get_cloudflare_requests():
-    """Cloudflare Tüneli üzerinden geçen toplam HTTP istek sayısını Prometheus metriklerinden çeker."""
+def get_cloudflare_metrics():
+    """Tüm Cloudflare ağ istatistiklerini Prometheus'tan detaylıca çeker."""
+    metrics = {
+        'total': 0.0, 'success': 0.0, 'error': 0.0, 
+        'sessions': 0.0, 'latency': 0.0, 'recv': 0.0, 'sent': 0.0
+    }
     try:
         req = urllib.request.urlopen('http://localhost:2000/metrics', timeout=2)
         lines = req.read().decode('utf-8').split('\n')
+        
+        latencies = []
         for line in lines:
-            if line.startswith('cloudflared_tunnel_total_requests'):
-                # Örnek satır: cloudflared_tunnel_total_requests 1542
-                return float(line.split(' ')[1])
+            if line.startswith('cloudflared_tunnel_total_requests '):
+                metrics['total'] = float(line.split(' ')[1])
+            elif line.startswith('cloudflared_tunnel_response_by_code{status_code="200"} '):
+                metrics['success'] = float(line.split(' ')[1])
+            elif line.startswith('cloudflared_tunnel_response_by_code{status_code="500"} '):
+                metrics['error'] = float(line.split(' ')[1])
+            elif line.startswith('cloudflared_tcp_active_sessions '):
+                metrics['sessions'] = float(line.split(' ')[1])
+            elif line.startswith('quic_client_smoothed_rtt{'):
+                latencies.append(float(line.split(' ')[1]))
+            elif line.startswith('quic_client_receive_bytes{'):
+                metrics['recv'] += float(line.split(' ')[1]) 
+            elif line.startswith('quic_client_sent_bytes{'):
+                metrics['sent'] += float(line.split(' ')[1]) 
+                
+        if latencies:
+            metrics['latency'] = round(sum(latencies) / len(latencies), 2) # Ortalama ping hesaplaması
+            
     except Exception:
-        return 0.0
-    return 0.0
+        pass
+    return metrics
 
 def get_recent_errors():
+    """Journalctl üzerinden son 5 sistem hatasını metin listesi olarak döndürür."""
     current_errors = []
     try:
         result = subprocess.run(['journalctl', '-p', '3', '-n', '5', '--no-pager'], capture_output=True, text=True)
@@ -71,13 +95,12 @@ def get_recent_errors():
     return current_errors
 
 def push_metrics(stub):
-    global LAST_SERVICES_STATE, LAST_ERRORS_STATE, LAST_CONTAINERS_STATE
+    global LAST_SERVICES_STATE, LAST_ERRORS_STATE, LAST_CONTAINERS_STATE, LAST_CLOUDFLARE_STATE
     
     while True:
         try:
             sys_cpu = psutil.cpu_percent(interval=1)
             sys_mem = psutil.virtual_memory().percent
-            cf_requests = get_cloudflare_requests()
 
             # 1. Container Verileri (CPU ve RAM dahil)
             current_containers = []
@@ -85,11 +108,10 @@ def push_metrics(stub):
                 for c in docker_client.containers.list(all=True):
                     health = c.attrs['State']['Health']['Status'] if 'State' in c.attrs and 'Health' in c.attrs['State'] else "none"
                     
-                    # Kaynak hesaplaması
                     cpu_perc = 0.0
                     mem_mb = 0.0
                     if c.status == 'running':
-                        stats = c.stats(stream=False) # Anlık stat çek
+                        stats = c.stats(stream=False) 
                         
                         # Docker CPU formülü (cgroups v1 ve v2 uyumlu)
                         cpu_delta = stats['cpu_stats']['cpu_usage']['total_usage'] - stats['precpu_stats']['cpu_usage'].get('total_usage', 0)
@@ -100,7 +122,6 @@ def push_metrics(stub):
                         if system_cpu_usage is not None and precpu_system_cpu_usage is not None:
                             system_cpu_delta = system_cpu_usage - precpu_system_cpu_usage
                             if system_cpu_delta > 0.0 and cpu_delta > 0.0:
-                                # cgroups v2'de 'online_cpus' vardır, yoksa 'percpu_usage' uzunluğuna bakar, o da yoksa 1 sayar.
                                 online_cpus = stats['cpu_stats'].get('online_cpus')
                                 if online_cpus is None:
                                     percpu_usage = stats['cpu_stats']['cpu_usage'].get('percpu_usage')
@@ -115,15 +136,19 @@ def push_metrics(stub):
                         'cpu': round(cpu_perc, 2), 'mem': round(mem_mb, 2)
                     })
 
-            # 2. Servis Verileri (CPU ve RAM dahil)
+            # 2. Servis Verileri
             current_services = []
             for srv in TARGET_SERVICES:
                 st, c, m = get_service_metrics(srv)
                 current_services.append({'name': srv, 'status': st, 'cpu': c, 'mem': m})
 
+            # 3. Log Verileri
             current_errors = get_recent_errors()
 
-            # --- DELTA KONTROLÜ ---
+            # 4. YENİ: Cloudflare Verileri
+            cf_data = get_cloudflare_metrics()
+
+            # --- DELTA KONTROLÜ (Sadece Değişenleri Gönder) ---
             containers_to_send = []
             if current_containers != LAST_CONTAINERS_STATE:
                 containers_to_send = [agent_pb2.ContainerInfo(container_id=c['id'], name=c['name'], state=c['state'], health=c['health'], cpu_percent=c['cpu'], memory_mb=c['mem']) for c in current_containers]
@@ -139,27 +164,44 @@ def push_metrics(stub):
                 errors_to_send = [agent_pb2.ErrorLog(log_message=err) for err in current_errors]
                 LAST_ERRORS_STATE = current_errors
 
+            # Protobuf Nesnesini Oluştur
             metrics = agent_pb2.SystemMetrics(
                 server_id=SERVER_ID,
                 cpu_usage_percent=sys_cpu,
                 memory_usage_percent=sys_mem,
-                cf_tunnel_requests=cf_requests, # Cloudflare trafiği
                 containers=containers_to_send,
                 services=services_to_send,   
                 error_logs=errors_to_send 
             )
 
+            # Cloudflare verisinde değişim varsa protobufa ekle
+            if cf_data != LAST_CLOUDFLARE_STATE:
+                metrics.cloudflare.CopyFrom(agent_pb2.CloudflareInfo(
+                    total_requests=cf_data['total'],
+                    successful_requests=cf_data['success'],
+                    server_errors=cf_data['error'],
+                    active_sessions=cf_data['sessions'],
+                    latency_ms=cf_data['latency'],
+                    bytes_received=cf_data['recv'],
+                    bytes_sent=cf_data['sent']
+                ))
+                LAST_CLOUDFLARE_STATE = cf_data
+
+            # Sunucuya gönder
             response = stub.PushMetrics(metrics)
             if response.success:
-                print(f"[{SERVER_ID}] CF Istekleri: {cf_requests} | Container: {len(containers_to_send)}, Servis: {len(services_to_send)}, Log: {len(errors_to_send)}")
+                print(f"[{SERVER_ID}] CPU: %{sys_cpu} | CF Ping: {cf_data['latency']}ms | Değişim: Container: {len(containers_to_send)}, Servis: {len(services_to_send)}, Log: {len(errors_to_send)}")
             
+        except grpc.RpcError as e:
+             print(f"Bağlantı hatası: {e.details()}")
         except Exception as e:
              print(f"Ajan içi hata: {e}")
         
+        # 5 saniye bekle ve döngüyü tekrar et
         time.sleep(5) 
 
 def run():
-    print(f"Merkeze bağlanılıyor...")
+    print(f"Merkeze ({SERVER_ADDRESS}) bağlanılıyor...")
     with grpc.insecure_channel(SERVER_ADDRESS) as channel:
         stub = agent_pb2_grpc.ServerManagerStub(channel)
         push_metrics(stub)
