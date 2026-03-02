@@ -1,5 +1,4 @@
 syntax = "proto3";
-
 package agent;
 
 service ServerManager {
@@ -12,12 +11,16 @@ message ContainerInfo {
   string name = 2;
   string state = 3;
   string health = 4;
+  double cpu_percent = 5;      // YENİ: Container CPU
+  double memory_mb = 6;        // YENİ: Container RAM (Megabyte)
 }
 
 // Yeni: Sistem servislerinin durumunu tutacak yapı
 message ServiceInfo {
   string name = 1;
-  string status = 2; // "active", "inactive", "failed" vb.
+  string status = 2;
+  double cpu_percent = 3;      // YENİ: Servis CPU
+  double memory_mb = 4;        // YENİ: Servis RAM (Megabyte)
 }
 
 // Yeni: Sistem hata loglarını tutacak yapı
@@ -29,9 +32,10 @@ message SystemMetrics {
   string server_id = 1;
   double cpu_usage_percent = 2;
   double memory_usage_percent = 3;
-  repeated ContainerInfo containers = 4;
-  repeated ServiceInfo services = 5; // Yeni eklenen
-  repeated ErrorLog error_logs = 6;  // Yeni eklenen
+  double cf_tunnel_requests = 4; 
+  repeated ContainerInfo containers = 5;
+  repeated ServiceInfo services = 6;
+  repeated ErrorLog error_logs = 7;
 }
 
 message MetricResponse {
