@@ -17,6 +17,32 @@ message CloudflareInfo {
   double bytes_sent = 7;          // Yükleme
 }
 
+message DiskInfo {
+  string device = 1;       // Örn: /dev/sda1
+  string mount_point = 2;  // Örn: /
+  string file_system = 3;  // Örn: ext4
+  double total_gb = 4;
+  double used_gb = 5;
+  double free_gb = 6;
+  double usage_percent = 7;
+}
+
+// YENİ 2: İşletim Sistemi Bilgisi
+message OsInfo {
+  string os_name = 1;            // Örn: Linux
+  string version = 2;            // Örn: Fedora 39
+  string kernel_version = 3;     // Örn: 6.5.0-generic
+  string architecture = 4;       // Örn: x86_64
+  int64 system_uptime_seconds = 5; 
+}
+
+// YENİ 3: Donanım Bilgisi
+message HardwareInfo {
+  string cpu_model = 1;          // Örn: Intel Core i7
+  int32 cpu_cores = 2;           // Fiziksel çekirdek
+  int32 cpu_logical_cores = 3;   // Mantıksal çekirdek (Thread)
+  double total_ram_gb = 4;
+}
 message ContainerInfo {
   string container_id = 1;
   string name = 2;
@@ -41,11 +67,13 @@ message SystemMetrics {
   string server_id = 1;
   double cpu_usage_percent = 2;
   double memory_usage_percent = 3;
-  // cf_tunnel_requests alanını SİLDİK, yerine bu nesneyi koyduk:
   CloudflareInfo cloudflare = 4; 
   repeated ContainerInfo containers = 5;
   repeated ServiceInfo services = 6;
   repeated ErrorLog error_logs = 7;
+  repeated DiskInfo disks = 8;
+  OsInfo os_info = 9;
+  HardwareInfo hardware_info = 10;
 }
 
 message MetricResponse {
