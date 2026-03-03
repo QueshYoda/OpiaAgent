@@ -25,6 +25,9 @@ message DiskInfo {
   double used_gb = 5;
   double free_gb = 6;
   double usage_percent = 7;
+  double read_speed_mb = 8;
+  double write_speed_mb = 9;
+  double inode_usage_percent = 10;
 }
 
 // YENİ 2: İşletim Sistemi Bilgisi
@@ -34,6 +37,16 @@ message OsInfo {
   string kernel_version = 3;     // Örn: 6.5.0-generic
   string architecture = 4;       // Örn: x86_64
   int64 system_uptime_seconds = 5; 
+  double load_avg_1m = 6;
+  double load_avg_5m = 7;
+  double load_avg_15m = 8;
+  int32 active_users = 9;
+  int32 pending_updates = 10;
+  double cpu_temperature = 5;
+  double current_cpu_freq_ghz = 6;
+  double swap_total_gb = 7;
+  double swap_used_gb = 8;
+  double swap_usage_percent = 9;
 }
 
 // YENİ 3: Donanım Bilgisi
