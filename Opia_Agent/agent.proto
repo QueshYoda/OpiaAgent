@@ -6,56 +6,16 @@ service ServerManager {
   rpc CommandStream (stream CommandResult) returns (stream CommandRequest) {}
 }
 
-// YENİ: Cloudflare için özel detaylı yapı
 message CloudflareInfo {
   double total_requests = 1;
-  double successful_requests = 2; // HTTP 200
-  double server_errors = 3;       // HTTP 500
+  double successful_requests = 2;
+  double server_errors = 3;
   double active_sessions = 4;
-  double latency_ms = 5;          // Ping/Gecikme
-  double bytes_received = 6;      // İndirme
-  double bytes_sent = 7;          // Yükleme
+  double latency_ms = 5;
+  double bytes_received = 6;
+  double bytes_sent = 7;
 }
 
-message DiskInfo {
-  string device = 1;       // Örn: /dev/sda1
-  string mount_point = 2;  // Örn: /
-  string file_system = 3;  // Örn: ext4
-  double total_gb = 4;
-  double used_gb = 5;
-  double free_gb = 6;
-  double usage_percent = 7;
-  double read_speed_mb = 8;
-  double write_speed_mb = 9;
-  double inode_usage_percent = 10;
-}
-
-// YENİ 2: İşletim Sistemi Bilgisi
-message OsInfo {
-  string os_name = 1;            // Örn: Linux
-  string version = 2;            // Örn: Fedora 39
-  string kernel_version = 3;     // Örn: 6.5.0-generic
-  string architecture = 4;       // Örn: x86_64
-  int64 system_uptime_seconds = 5; 
-  double load_avg_1m = 6;
-  double load_avg_5m = 7;
-  double load_avg_15m = 8;
-  int32 active_users = 9;
-  int32 pending_updates = 10;
-  double cpu_temperature = 5;
-  double current_cpu_freq_ghz = 6;
-  double swap_total_gb = 7;
-  double swap_used_gb = 8;
-  double swap_usage_percent = 9;
-}
-
-// YENİ 3: Donanım Bilgisi
-message HardwareInfo {
-  string cpu_model = 1;          // Örn: Intel Core i7
-  int32 cpu_cores = 2;           // Fiziksel çekirdek
-  int32 cpu_logical_cores = 3;   // Mantıksal çekirdek (Thread)
-  double total_ram_gb = 4;
-}
 message ContainerInfo {
   string container_id = 1;
   string name = 2;
@@ -76,11 +36,49 @@ message ErrorLog {
   string log_message = 1;
 }
 
+message DiskInfo {
+  string device = 1;
+  string mount_point = 2;
+  string file_system = 3;
+  double total_gb = 4;
+  double used_gb = 5;
+  double free_gb = 6;
+  double usage_percent = 7;
+  double read_speed_mb = 8;
+  double write_speed_mb = 9;
+  double inode_usage_percent = 10;
+}
+
+message OsInfo {
+  string os_name = 1;
+  string version = 2;
+  string kernel_version = 3;
+  string architecture = 4;
+  int64 system_uptime_seconds = 5;
+  double load_avg_1m = 6;
+  double load_avg_5m = 7;
+  double load_avg_15m = 8;
+  int32 active_users = 9;
+  int32 pending_updates = 10;
+}
+
+message HardwareInfo {
+  string cpu_model = 1;
+  int32 cpu_cores = 2;
+  int32 cpu_logical_cores = 3;
+  double total_ram_gb = 4;
+  double cpu_temperature = 5;
+  double current_cpu_freq_ghz = 6;
+  double swap_total_gb = 7;
+  double swap_used_gb = 8;
+  double swap_usage_percent = 9;
+}
+
 message SystemMetrics {
   string server_id = 1;
   double cpu_usage_percent = 2;
   double memory_usage_percent = 3;
-  CloudflareInfo cloudflare = 4; 
+  CloudflareInfo cloudflare = 4;
   repeated ContainerInfo containers = 5;
   repeated ServiceInfo services = 6;
   repeated ErrorLog error_logs = 7;
