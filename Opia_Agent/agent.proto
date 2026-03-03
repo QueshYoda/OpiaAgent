@@ -15,6 +15,22 @@ message CloudflareInfo {
   double bytes_received = 6;
   double bytes_sent = 7;
 }
+message NetworkInfo {
+  string interface_name = 1;
+  double download_speed_mbps = 2; 
+  double upload_speed_mbps = 3;   
+}
+
+message ProcessInfo {
+  int32 pid = 1;
+  string name = 2;
+  double cpu_percent = 3;
+  double memory_mb = 4;
+}
+
+message SecurityLog {
+  string message = 1;
+}
 
 message ContainerInfo {
   string container_id = 1;
@@ -85,6 +101,9 @@ message SystemMetrics {
   repeated DiskInfo disks = 8;
   OsInfo os_info = 9;
   HardwareInfo hardware_info = 10;
+  repeated NetworkInfo network_interfaces = 11;
+  repeated ProcessInfo top_processes = 12;
+  repeated SecurityLog security_logs = 13;
 }
 
 message MetricResponse {

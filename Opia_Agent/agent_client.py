@@ -10,11 +10,12 @@ import os
 import agent_pb2
 import agent_pb2_grpc
 
+# --- AYARLAR ---
 SERVER_ADDRESS = '192.168.0.100:5054' 
 SERVER_ID = 'fedora-node-01'
-
 TARGET_SERVICES = ['jenkins', 'postgresql', 'cloudflared'] 
 
+# --- HAFIZA (DELTA KONTROLÜ İÇİN) ---
 LAST_SERVICES_STATE = []
 LAST_ERRORS_STATE = []
 LAST_CONTAINERS_STATE = []
@@ -22,22 +23,28 @@ LAST_CLOUDFLARE_STATE = None
 LAST_DISK_STATE = []
 LAST_OS_STATE = None
 LAST_HW_STATE = None
+LAST_NETWORK_STATE = []
+LAST_PROCESS_STATE = []
+LAST_SECURITY_STATE = []
 
-# Disk hızı ve Güncelleme kontrolü için zamanlayıcılar
+# Hız ve zaman hesaplamaları için
 LAST_DISK_IO = None
+LAST_NET_IO = None
 LAST_IO_TIME = time.time()
 LAST_UPDATE_CHECK_TIME = 0
 PENDING_UPDATES_COUNT = 0
 
+# Docker bağlantısı
 try:
     docker_client = docker.from_env()
 except Exception:
     docker_client = None
 
+# --- SENSÖR FONKSİYONLARI ---
+
 def get_pending_updates():
-    """Fedora DNF üzerinden bekleyen güncellemeleri saatte 1 kez sayar."""
     global LAST_UPDATE_CHECK_TIME, PENDING_UPDATES_COUNT
-    if time.time() - LAST_UPDATE_CHECK_TIME > 3600:
+    if time.time() - LAST_UPDATE_CHECK_TIME > 3600: # Saatte 1 kez kontrol et
         try:
             res = subprocess.run(['dnf', 'check-update', '-q'], capture_output=True, text=True)
             PENDING_UPDATES_COUNT = len([line for line in res.stdout.split('\n') if line.strip()])
@@ -47,7 +54,6 @@ def get_pending_updates():
     return PENDING_UPDATES_COUNT
 
 def get_cpu_temp():
-    """İşlemci sıcaklığını okur."""
     try:
         temps = psutil.sensors_temperatures()
         if not temps: return 0.0
@@ -82,14 +88,12 @@ def get_disk_metrics():
         try:
             usage = psutil.disk_usage(part.mountpoint)
             
-            # Inode Hesabı
             try:
                 st = os.statvfs(part.mountpoint)
                 inode_percent = ((st.f_files - st.f_ffree) / st.f_files) * 100.0 if st.f_files > 0 else 0.0
             except:
                 inode_percent = 0.0
 
-            # IO (Okuma/Yazma) Hızı Hesabı
             read_speed = 0.0
             write_speed = 0.0
             dev_name = part.device.split('/')[-1]
@@ -116,8 +120,62 @@ def get_disk_metrics():
             continue
             
     LAST_DISK_IO = io_counters
-    LAST_IO_TIME = current_time
     return disks
+
+def get_network_metrics():
+    global LAST_NET_IO, LAST_IO_TIME
+    current_time = time.time()
+    time_diff = current_time - LAST_IO_TIME
+    if time_diff <= 0: time_diff = 1
+
+    net_counters = psutil.net_io_counters(pernic=True)
+    networks = []
+    
+    for nic, io in net_counters.items():
+        if nic == 'lo' or nic.startswith('veth') or nic.startswith('br-') or nic.startswith('docker'): 
+            continue
+            
+        down_speed = 0.0
+        up_speed = 0.0
+        
+        if LAST_NET_IO and nic in LAST_NET_IO:
+            prev_io = LAST_NET_IO[nic]
+            down_speed = ((io.bytes_recv - prev_io.bytes_recv) / time_diff) / (1024*1024)
+            up_speed = ((io.bytes_sent - prev_io.bytes_sent) / time_diff) / (1024*1024)
+            
+        networks.append({
+            'name': nic,
+            'down': round(max(0, down_speed), 2),
+            'up': round(max(0, up_speed), 2)
+        })
+        
+    LAST_NET_IO = net_counters
+    LAST_IO_TIME = current_time # Hem disk hem ağ aynı timer'ı kullanıyor
+    return networks
+
+def get_top_processes():
+    processes = []
+    try:
+        for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_info']):
+            try:
+                cpu = proc.info['cpu_percent']
+                if cpu > 0.0: 
+                    mem_mb = proc.info['memory_info'].rss / (1024 * 1024)
+                    processes.append({'pid': proc.info['pid'], 'name': proc.info['name'], 'cpu': round(cpu, 2), 'mem': round(mem_mb, 2)})
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
+        processes = sorted(processes, key=lambda p: p['cpu'], reverse=True)[:5]
+    except Exception: pass
+    return processes
+
+def get_security_logs():
+    try:
+        result = subprocess.run(['journalctl', '-u', 'sshd', '-n', '20', '--no-pager'], capture_output=True, text=True)
+        lines = result.stdout.strip().split('\n')
+        # İçinde Failed password veya Connection closed by authenticating user olanları filtrele
+        return [line[:200] for line in lines if "Failed password" in line or "Connection closed by authenticating user" in line]
+    except Exception:
+        return []
 
 def get_service_metrics(service_name):
     status = "unknown"
@@ -161,8 +219,11 @@ def get_recent_errors():
     except Exception as e:
         return [f"Log hatasi: {e}"]
 
+# --- ANA DÖNGÜ ---
+
 def push_metrics(stub):
     global LAST_SERVICES_STATE, LAST_ERRORS_STATE, LAST_CONTAINERS_STATE, LAST_CLOUDFLARE_STATE, LAST_DISK_STATE, LAST_OS_STATE, LAST_HW_STATE
+    global LAST_NETWORK_STATE, LAST_PROCESS_STATE, LAST_SECURITY_STATE
     
     while True:
         try:
@@ -197,6 +258,9 @@ def push_metrics(stub):
             }
 
             current_disks = get_disk_metrics()
+            current_networks = get_network_metrics()
+            current_processes = get_top_processes()
+            current_security = get_security_logs()
 
             current_containers = []
             if docker_client:
@@ -225,12 +289,15 @@ def push_metrics(stub):
             current_errors = get_recent_errors()
             cf_data = get_cloudflare_metrics()
 
+            # --- PROTOBUF MESAJINI HAZIRLA ---
             metrics = agent_pb2.SystemMetrics(
                 server_id=SERVER_ID,
                 cpu_usage_percent=sys_cpu,
                 memory_usage_percent=sys_mem.percent,
             )
 
+            # --- DELTA KONTROLLERİ ---
+            
             os_compare_state = {k: v for k, v in current_os.items() if k not in ['uptime', 'load1', 'load5', 'load15']}
             if os_compare_state != LAST_OS_STATE:
                 metrics.os_info.CopyFrom(agent_pb2.OsInfo(os_name=current_os['os_name'], version=current_os['version'], kernel_version=current_os['kernel_version'], architecture=current_os['arch'], system_uptime_seconds=current_os['uptime'], load_avg_1m=current_os['load1'], load_avg_5m=current_os['load5'], load_avg_15m=current_os['load15'], active_users=current_os['active_users'], pending_updates=current_os['pending_updates']))
@@ -244,6 +311,18 @@ def push_metrics(stub):
             if current_disks != LAST_DISK_STATE:
                 for d in current_disks: metrics.disks.add(device=d['device'], mount_point=d['mount_point'], file_system=d['fstype'], total_gb=d['total'], used_gb=d['used'], free_gb=d['free'], usage_percent=d['percent'], read_speed_mb=d['read_speed'], write_speed_mb=d['write_speed'], inode_usage_percent=d['inode_percent'])
                 LAST_DISK_STATE = current_disks
+
+            if current_networks != LAST_NETWORK_STATE:
+                for n in current_networks: metrics.network_interfaces.add(interface_name=n['name'], download_speed_mbps=n['down'], upload_speed_mbps=n['up'])
+                LAST_NETWORK_STATE = current_networks
+
+            if current_processes != LAST_PROCESS_STATE:
+                for p in current_processes: metrics.top_processes.add(pid=p['pid'], name=p['name'], cpu_percent=p['cpu'], memory_mb=p['mem'])
+                LAST_PROCESS_STATE = current_processes
+
+            if current_security != LAST_SECURITY_STATE:
+                for s in current_security: metrics.security_logs.add(message=s)
+                LAST_SECURITY_STATE = current_security
 
             if current_containers != LAST_CONTAINERS_STATE:
                 for c in current_containers: metrics.containers.add(container_id=c['id'], name=c['name'], state=c['state'], health=c['health'], cpu_percent=c['cpu'], memory_mb=c['mem'])
@@ -261,10 +340,14 @@ def push_metrics(stub):
                 metrics.cloudflare.CopyFrom(agent_pb2.CloudflareInfo(total_requests=cf_data['total'], successful_requests=cf_data['success'], server_errors=cf_data['error'], active_sessions=cf_data['sessions'], latency_ms=cf_data['latency'], bytes_received=cf_data['recv'], bytes_sent=cf_data['sent']))
                 LAST_CLOUDFLARE_STATE = cf_data
 
+            # Merkeze Gönder
             response = stub.PushMetrics(metrics)
-            if response.success: print(f"[{SERVER_ID}] CPU Sıcaklık: {current_hw['cpu_temp']}°C | OS Yük: {current_os['load1']} | İletildi.")
+            if response.success: 
+                print(f"[{SERVER_ID}] CPU: %{sys_cpu} | Ağ, Süreçler ve Güvenlik tarandı. İletildi.")
             
-        except Exception as e: print(f"Ajan içi hata: {e}")
+        except Exception as e: 
+            print(f"Ajan içi hata: {e}")
+            
         time.sleep(5) 
 
 def run():
