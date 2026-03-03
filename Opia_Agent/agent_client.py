@@ -15,7 +15,7 @@ SERVER_ADDRESS = '192.168.0.100:5054'
 SERVER_ID = 'fedora-node-01'
 TARGET_SERVICES = ['jenkins', 'postgresql', 'cloudflared'] 
 
-# --- HAFIZA (DELTA KONTROLÜ İÇİN) ---
+# --- HAFIZA ---
 LAST_SERVICES_STATE = []
 LAST_ERRORS_STATE = []
 LAST_CONTAINERS_STATE = []
@@ -30,77 +30,84 @@ LAST_OPEN_PORTS_STATE = []
 LAST_TCP_STATES_STATE = []
 LAST_SMART_DISK_STATE = []
 
-# Hız ve zaman hesaplamaları için
-LAST_DISK_IO = None
-LAST_NET_IO = None
+LAST_DISK_IO, LAST_NET_IO = None, None
 LAST_IO_TIME = time.time()
 LAST_UPDATE_CHECK_TIME = 0
 PENDING_UPDATES_COUNT = 0
 
-# Docker bağlantısı
-try:
-    docker_client = docker.from_env()
-except Exception:
-    docker_client = None
+try: docker_client = docker.from_env()
+except Exception: docker_client = None
 
-# --- SİBER GÜVENLİK VE NIDS SENSÖRLERİ ---
-
-def get_open_ports():
-    open_ports = []
-    try:
-        # psutil ile açık olan portları ve onları dinleyen süreçleri bul (sudo yetkisi gerektirir)
-        for conn in psutil.net_connections(kind='inet'):
-            if conn.status == 'LISTEN':
-                port = conn.laddr.port
-                protocol = 'TCP' if conn.type == 1 else 'UDP'
-                try:
-                    proc_name = psutil.Process(conn.pid).name() if conn.pid else "unknown"
-                except:
-                    proc_name = "unknown"
-                
-                # Çift kayıtları (IPv4 ve IPv6) engelle
-                if not any(p['port'] == port for p in open_ports):
-                    open_ports.append({'port': port, 'protocol': protocol, 'process_name': proc_name})
-    except Exception: pass
-    # Port numarasına göre sırala
-    return sorted(open_ports, key=lambda x: x['port'])
-
-def get_tcp_states():
-    state_counts = {}
-    try:
-        for conn in psutil.net_connections(kind='tcp'):
-            state = conn.status
-            state_counts[state] = state_counts.get(state, 0) + 1
-    except Exception: pass
-    return [{'state': k, 'count': v} for k, v in state_counts.items()]
+# --- NVMe SMART AYRIŞTIRICI ---
+def parse_nvme_smart(output):
+    data = {'temp': 0.0, 'spare': 0.0, 'used': 0.0, 'read_tb': 0.0, 'write_tb': 0.0, 'power_cycles': 0, 'power_on_hours': 0, 'unsafe_shutdowns': 0, 'media_errors': 0}
+    for line in output.split('\n'):
+        line = line.strip()
+        try:
+            if line.startswith('Temperature:'): data['temp'] = float(line.split(':')[1].strip().split()[0])
+            elif line.startswith('Available Spare:'): data['spare'] = float(line.split(':')[1].strip().replace('%',''))
+            elif line.startswith('Percentage Used:'): data['used'] = float(line.split(':')[1].strip().replace('%',''))
+            elif line.startswith('Data Units Read:'):
+                tb_str = line.split('[')[1].split(']')[0] 
+                val = float(tb_str.split()[0].replace(',',''))
+                data['read_tb'] = val if "TB" in tb_str else (val / 1024.0 if "GB" in tb_str else val)
+            elif line.startswith('Data Units Written:'):
+                tb_str = line.split('[')[1].split(']')[0] 
+                val = float(tb_str.split()[0].replace(',',''))
+                data['write_tb'] = val if "TB" in tb_str else (val / 1024.0 if "GB" in tb_str else val)
+            elif line.startswith('Power Cycles:'): data['power_cycles'] = int(line.split(':')[1].replace(',','').strip())
+            elif line.startswith('Power On Hours:'): data['power_on_hours'] = int(line.split(':')[1].replace(',','').strip())
+            elif line.startswith('Unsafe Shutdowns:'): data['unsafe_shutdowns'] = int(line.split(':')[1].replace(',','').strip())
+            elif line.startswith('Media and Data Integrity Errors:'): data['media_errors'] = int(line.split(':')[1].replace(',','').strip())
+        except Exception: pass
+    return data
 
 def get_smart_disk_health():
     healths = []
     try:
         devices = set()
         for part in psutil.disk_partitions(all=False):
-            # Sadece fiziksel diskleri al (loop, ram, veth vb. hariç)
             if part.device.startswith('/dev/sd') or part.device.startswith('/dev/nvme'):
-                # /dev/sda1 yerine /dev/sda (ana disk) yolunu bul
-                dev = part.device.rstrip('0123456789p')
-                devices.add(dev)
+                devices.add(part.device.rstrip('0123456789p'))
         
         for dev in devices:
-            # S.M.A.R.T. kontrolü yap
-            res = subprocess.run(['smartctl', '-H', dev], capture_output=True, text=True)
-            output = res.stdout.upper()
-            status = "UNKNOWN"
-            if "PASSED" in output or "OK" in output:
-                status = "PASSED"
-            elif "FAILED" in output:
-                status = "FAILED"
+            res_a = subprocess.run(['smartctl', '-A', dev], capture_output=True, text=True)
+            parsed = parse_nvme_smart(res_a.stdout)
+            # NVMe diskler için media error 0 ise ve spare > 10 ise PASSED kabul ediyoruz
+            status = "PASSED" if parsed['media_errors'] == 0 and parsed['spare'] > 10 else "WARNING/FAILED"
             
-            if status != "UNKNOWN":
-                healths.append({'device': dev, 'health_status': status})
+            healths.append({
+                'device': dev, 'health_status': status,
+                'temp': parsed['temp'], 'spare': parsed['spare'], 'used': parsed['used'],
+                'read_tb': parsed['read_tb'], 'write_tb': parsed['write_tb'],
+                'power_cycles': parsed['power_cycles'], 'power_on_hours': parsed['power_on_hours'],
+                'unsafe_shutdowns': parsed['unsafe_shutdowns'], 'media_errors': parsed['media_errors']
+            })
     except Exception: pass
     return healths
 
-# --- DİĞER SENSÖR FONKSİYONLARI ---
+# (Diğer fonksiyonlar aynı)
+def get_open_ports():
+    open_ports = []
+    try:
+        for conn in psutil.net_connections(kind='inet'):
+            if conn.status == 'LISTEN':
+                port = conn.laddr.port
+                protocol = 'TCP' if conn.type == 1 else 'UDP'
+                try: proc_name = psutil.Process(conn.pid).name() if conn.pid else "unknown"
+                except: proc_name = "unknown"
+                if not any(p['port'] == port for p in open_ports):
+                    open_ports.append({'port': port, 'protocol': protocol, 'process_name': proc_name})
+    except Exception: pass
+    return sorted(open_ports, key=lambda x: x['port'])
+
+def get_tcp_states():
+    state_counts = {}
+    try:
+        for conn in psutil.net_connections(kind='tcp'):
+            state_counts[conn.status] = state_counts.get(conn.status, 0) + 1
+    except Exception: pass
+    return [{'state': k, 'count': v} for k, v in state_counts.items()]
 
 def get_pending_updates():
     global LAST_UPDATE_CHECK_TIME, PENDING_UPDATES_COUNT
@@ -117,8 +124,7 @@ def get_cpu_temp():
         temps = psutil.sensors_temperatures()
         if not temps: return 0.0
         for name, entries in temps.items():
-            if name in ['coretemp', 'k10temp', 'cpu_thermal', 'acpitz']:
-                return entries[0].current
+            if name in ['coretemp', 'k10temp', 'cpu_thermal', 'acpitz']: return entries[0].current
         return list(temps.values())[0][0].current
     except Exception: return 0.0
 
@@ -133,12 +139,9 @@ def get_cpu_model():
 def get_disk_metrics():
     global LAST_DISK_IO, LAST_IO_TIME
     current_time = time.time()
-    time_diff = current_time - LAST_IO_TIME
-    if time_diff <= 0: time_diff = 1
-
+    time_diff = max(1, current_time - LAST_IO_TIME)
     io_counters = psutil.disk_io_counters(perdisk=True)
     disks = []
-    
     for part in psutil.disk_partitions(all=False):
         if 'loop' in part.device or 'snap' in part.mountpoint: continue
         try:
@@ -165,30 +168,23 @@ def get_disk_metrics():
                 'read_speed': round(max(0, read_speed), 2), 'write_speed': round(max(0, write_speed), 2)
             })
         except Exception: continue
-            
     LAST_DISK_IO = io_counters
     return disks
 
 def get_network_metrics():
     global LAST_NET_IO, LAST_IO_TIME
     current_time = time.time()
-    time_diff = current_time - LAST_IO_TIME
-    if time_diff <= 0: time_diff = 1
-
+    time_diff = max(1, current_time - LAST_IO_TIME)
     net_counters = psutil.net_io_counters(pernic=True)
     networks = []
-    
     for nic, io in net_counters.items():
         if nic == 'lo' or nic.startswith('veth') or nic.startswith('br-') or nic.startswith('docker'): continue
-            
         down_speed, up_speed = 0.0, 0.0
         if LAST_NET_IO and nic in LAST_NET_IO:
             prev_io = LAST_NET_IO[nic]
             down_speed = ((io.bytes_recv - prev_io.bytes_recv) / time_diff) / (1024*1024)
             up_speed = ((io.bytes_sent - prev_io.bytes_sent) / time_diff) / (1024*1024)
-            
         networks.append({'name': nic, 'down': round(max(0, down_speed), 2), 'up': round(max(0, up_speed), 2)})
-        
     LAST_NET_IO = net_counters
     LAST_IO_TIME = current_time 
     return networks
@@ -253,7 +249,6 @@ def get_recent_errors():
     except Exception as e: return [f"Log hatasi: {e}"]
 
 # --- ANA DÖNGÜ ---
-
 def push_metrics(stub):
     global LAST_SERVICES_STATE, LAST_ERRORS_STATE, LAST_CONTAINERS_STATE, LAST_CLOUDFLARE_STATE, LAST_DISK_STATE, LAST_OS_STATE, LAST_HW_STATE
     global LAST_NETWORK_STATE, LAST_PROCESS_STATE, LAST_SECURITY_STATE, LAST_OPEN_PORTS_STATE, LAST_TCP_STATES_STATE, LAST_SMART_DISK_STATE
@@ -267,20 +262,8 @@ def push_metrics(stub):
             try: cpu_freq = psutil.cpu_freq().current / 1000.0
             except: cpu_freq = 0.0
 
-            current_os = {
-                'os_name': platform.system(), 'version': platform.release(), 'kernel_version': platform.version(),
-                'arch': platform.machine(), 'uptime': int(time.time() - psutil.boot_time()),
-                'load1': round(load1, 2), 'load5': round(load5, 2), 'load15': round(load15, 2),
-                'active_users': len(psutil.users()), 'pending_updates': get_pending_updates()
-            }
-
-            current_hw = {
-                'cpu_model': get_cpu_model(), 'cpu_cores': psutil.cpu_count(logical=False) or 0,
-                'cpu_logical': psutil.cpu_count(logical=True) or 0, 'total_ram': round(sys_mem.total / (1024**3), 2),
-                'cpu_temp': get_cpu_temp(), 'cpu_freq': round(cpu_freq, 2),
-                'swap_total': round(swap_mem.total / (1024**3), 2), 'swap_used': round(swap_mem.used / (1024**3), 2),
-                'swap_percent': swap_mem.percent
-            }
+            current_os = {'os_name': platform.system(), 'version': platform.release(), 'kernel_version': platform.version(), 'arch': platform.machine(), 'uptime': int(time.time() - psutil.boot_time()), 'load1': round(load1, 2), 'load5': round(load5, 2), 'load15': round(load15, 2), 'active_users': len(psutil.users()), 'pending_updates': get_pending_updates()}
+            current_hw = {'cpu_model': get_cpu_model(), 'cpu_cores': psutil.cpu_count(logical=False) or 0, 'cpu_logical': psutil.cpu_count(logical=True) or 0, 'total_ram': round(sys_mem.total / (1024**3), 2), 'cpu_temp': get_cpu_temp(), 'cpu_freq': round(cpu_freq, 2), 'swap_total': round(swap_mem.total / (1024**3), 2), 'swap_used': round(swap_mem.used / (1024**3), 2), 'swap_percent': swap_mem.percent}
 
             current_disks = get_disk_metrics()
             current_networks = get_network_metrics()
@@ -311,11 +294,8 @@ def push_metrics(stub):
             current_errors = get_recent_errors()
             cf_data = get_cloudflare_metrics()
 
-            # --- PROTOBUF MESAJINI HAZIRLA ---
             metrics = agent_pb2.SystemMetrics(server_id=SERVER_ID, cpu_usage_percent=sys_cpu, memory_usage_percent=sys_mem.percent)
 
-            # --- DELTA KONTROLLERİ ---
-            
             os_compare_state = {k: v for k, v in current_os.items() if k not in ['uptime', 'load1', 'load5', 'load15']}
             if os_compare_state != LAST_OS_STATE:
                 metrics.os_info.CopyFrom(agent_pb2.OsInfo(os_name=current_os['os_name'], version=current_os['version'], kernel_version=current_os['kernel_version'], architecture=current_os['arch'], system_uptime_seconds=current_os['uptime'], load_avg_1m=current_os['load1'], load_avg_5m=current_os['load5'], load_avg_15m=current_os['load15'], active_users=current_os['active_users'], pending_updates=current_os['pending_updates']))
@@ -350,8 +330,17 @@ def push_metrics(stub):
                 for t in current_tcp_states: metrics.tcp_states.add(state=t['state'], count=t['count'])
                 LAST_TCP_STATES_STATE = current_tcp_states
 
+            # YENİ NVMe GÜNCELLEMESİ
             if current_smart_disks != LAST_SMART_DISK_STATE:
-                for d in current_smart_disks: metrics.smart_disk_health.add(device=d['device'], health_status=d['health_status'])
+                for d in current_smart_disks: 
+                    metrics.smart_disk_health.add(
+                        device=d['device'], health_status=d['health_status'],
+                        temperature_celsius=d['temp'], available_spare_percent=d['spare'],
+                        percentage_used=d['used'], data_read_tb=d['read_tb'],
+                        data_written_tb=d['write_tb'], power_cycles=d['power_cycles'],
+                        power_on_hours=d['power_on_hours'], unsafe_shutdowns=d['unsafe_shutdowns'],
+                        media_errors=d['media_errors']
+                    )
                 LAST_SMART_DISK_STATE = current_smart_disks
 
             if current_containers != LAST_CONTAINERS_STATE:
@@ -370,14 +359,11 @@ def push_metrics(stub):
                 metrics.cloudflare.CopyFrom(agent_pb2.CloudflareInfo(total_requests=cf_data['total'], successful_requests=cf_data['success'], server_errors=cf_data['error'], active_sessions=cf_data['sessions'], latency_ms=cf_data['latency'], bytes_received=cf_data['recv'], bytes_sent=cf_data['sent']))
                 LAST_CLOUDFLARE_STATE = cf_data
 
-            # Merkeze Gönder
             response = stub.PushMetrics(metrics)
             if response.success: 
-                print(f"[{SERVER_ID}] CPU: %{sys_cpu} | Açık Portlar: {len(current_open_ports)} | TCP Bağlantı Durumu: {len(current_tcp_states)} Çeşit | İletildi.")
+                print(f"[{SERVER_ID}] CPU: %{sys_cpu} | SMART NVMe ve Ağ Güvenliği İletildi.")
             
-        except Exception as e: 
-            print(f"Ajan içi hata: {e}")
-            
+        except Exception as e: print(f"Ajan içi hata: {e}")
         time.sleep(5) 
 
 def run():

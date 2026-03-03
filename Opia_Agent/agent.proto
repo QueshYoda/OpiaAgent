@@ -39,8 +39,17 @@ message TcpStateInfo {
 }
 
 message SmartDiskHealth {
-  string device = 1; // Örn: /dev/sda
-  string health_status = 2; // Örn: PASSED, FAILED
+  string device = 1;
+  string health_status = 2;
+  double temperature_celsius = 3;
+  double available_spare_percent = 4;
+  double percentage_used = 5;
+  double data_read_tb = 6;
+  double data_written_tb = 7;
+  int32 power_cycles = 8;
+  int32 power_on_hours = 9;
+  int32 unsafe_shutdowns = 10;
+  int32 media_errors = 11;
 }
 
 message SecurityLog {
