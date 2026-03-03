@@ -38,28 +38,43 @@ PENDING_UPDATES_COUNT = 0
 try: docker_client = docker.from_env()
 except Exception: docker_client = None
 
-# --- NVMe SMART AYRIŞTIRICI ---
 def parse_nvme_smart(output):
     data = {'temp': 0.0, 'spare': 0.0, 'used': 0.0, 'read_tb': 0.0, 'write_tb': 0.0, 'power_cycles': 0, 'power_on_hours': 0, 'unsafe_shutdowns': 0, 'media_errors': 0}
     for line in output.split('\n'):
-        line = line.strip()
+        # Tüm gereksiz boşlukları ve virgülleri baştan temizle
+        clean_line = line.strip().replace(',', '')
+        
         try:
-            if line.startswith('Temperature:'): data['temp'] = float(line.split(':')[1].strip().split()[0])
-            elif line.startswith('Available Spare:'): data['spare'] = float(line.split(':')[1].strip().replace('%',''))
-            elif line.startswith('Percentage Used:'): data['used'] = float(line.split(':')[1].strip().replace('%',''))
-            elif line.startswith('Data Units Read:'):
-                tb_str = line.split('[')[1].split(']')[0] 
-                val = float(tb_str.split()[0].replace(',',''))
-                data['read_tb'] = val if "TB" in tb_str else (val / 1024.0 if "GB" in tb_str else val)
-            elif line.startswith('Data Units Written:'):
-                tb_str = line.split('[')[1].split(']')[0] 
-                val = float(tb_str.split()[0].replace(',',''))
-                data['write_tb'] = val if "TB" in tb_str else (val / 1024.0 if "GB" in tb_str else val)
-            elif line.startswith('Power Cycles:'): data['power_cycles'] = int(line.split(':')[1].replace(',','').strip())
-            elif line.startswith('Power On Hours:'): data['power_on_hours'] = int(line.split(':')[1].replace(',','').strip())
-            elif line.startswith('Unsafe Shutdowns:'): data['unsafe_shutdowns'] = int(line.split(':')[1].replace(',','').strip())
-            elif line.startswith('Media and Data Integrity Errors:'): data['media_errors'] = int(line.split(':')[1].replace(',','').strip())
-        except Exception: pass
+            if clean_line.startswith('Temperature:'): 
+                # Örnek: "Temperature: 45 Celsius"
+                data['temp'] = float(clean_line.split(':')[1].strip().split()[0])
+            elif clean_line.startswith('Available Spare:'): 
+                # Örnek: "Available Spare: 100%"
+                data['spare'] = float(clean_line.split(':')[1].strip().replace('%', ''))
+            elif clean_line.startswith('Percentage Used:'): 
+                # Örnek: "Percentage Used: 1%"
+                data['used'] = float(clean_line.split(':')[1].strip().replace('%', ''))
+            elif clean_line.startswith('Data Units Read:'):
+                # Örnek: "Data Units Read: 3010647 [1.54 TB]"
+                tb_part = clean_line.split('[')[1].split(']')[0] # "1.54 TB"
+                val = float(tb_part.split()[0])
+                data['read_tb'] = val if "TB" in tb_part else (val / 1024.0 if "GB" in tb_part else val)
+            elif clean_line.startswith('Data Units Written:'):
+                # Örnek: "Data Units Written: 5568510 [2.85 TB]"
+                tb_part = clean_line.split('[')[1].split(']')[0] 
+                val = float(tb_part.split()[0])
+                data['write_tb'] = val if "TB" in tb_part else (val / 1024.0 if "GB" in tb_part else val)
+            elif clean_line.startswith('Power Cycles:'): 
+                data['power_cycles'] = int(clean_line.split(':')[1].strip())
+            elif clean_line.startswith('Power On Hours:'): 
+                data['power_on_hours'] = int(clean_line.split(':')[1].strip())
+            elif clean_line.startswith('Unsafe Shutdowns:'): 
+                data['unsafe_shutdowns'] = int(clean_line.split(':')[1].strip())
+            elif clean_line.startswith('Media and Data Integrity Errors:'): 
+                data['media_errors'] = int(clean_line.split(':')[1].strip())
+        except Exception as e:
+            # Okuma hatası olursa pas geç (0 kalır)
+            pass
     return data
 
 def get_smart_disk_health():
