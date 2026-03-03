@@ -27,6 +27,21 @@ message ProcessInfo {
   double cpu_percent = 3;
   double memory_mb = 4;
 }
+message OpenPortInfo {
+  int32 port = 1;
+  string protocol = 2; // TCP, UDP
+  string process_name = 3; // Örn: sshd, nginx
+}
+
+message TcpStateInfo {
+  string state = 1; // Örn: ESTABLISHED, SYN_RECV, TIME_WAIT
+  int32 count = 2;
+}
+
+message SmartDiskHealth {
+  string device = 1; // Örn: /dev/sda
+  string health_status = 2; // Örn: PASSED, FAILED
+}
 
 message SecurityLog {
   string message = 1;
@@ -104,6 +119,9 @@ message SystemMetrics {
   repeated NetworkInfo network_interfaces = 11;
   repeated ProcessInfo top_processes = 12;
   repeated SecurityLog security_logs = 13;
+  repeated OpenPortInfo open_ports = 14;
+  repeated TcpStateInfo tcp_states = 15;
+  repeated SmartDiskHealth smart_disk_health = 16;
 }
 
 message MetricResponse {
