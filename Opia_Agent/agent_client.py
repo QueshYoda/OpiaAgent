@@ -6,6 +6,7 @@ import subprocess
 import urllib.request
 import platform
 import os
+import re
 
 import agent_pb2
 import agent_pb2_grpc
@@ -15,7 +16,7 @@ SERVER_ADDRESS = '192.168.0.100:5054'
 SERVER_ID = 'fedora-node-01'
 TARGET_SERVICES = ['jenkins', 'postgresql', 'cloudflared'] 
 
-# --- HAFIZA ---
+# --- HAFIZA (DELTA KONTROLÜ İÇİN) ---
 LAST_SERVICES_STATE = []
 LAST_ERRORS_STATE = []
 LAST_CONTAINERS_STATE = []
@@ -30,50 +31,49 @@ LAST_OPEN_PORTS_STATE = []
 LAST_TCP_STATES_STATE = []
 LAST_SMART_DISK_STATE = []
 
-LAST_DISK_IO, LAST_NET_IO = None, None
+# Hız ve zaman hesaplamaları için
+LAST_DISK_IO = None
+LAST_NET_IO = None
 LAST_IO_TIME = time.time()
 LAST_UPDATE_CHECK_TIME = 0
 PENDING_UPDATES_COUNT = 0
 
-try: docker_client = docker.from_env()
-except Exception: docker_client = None
+# Docker bağlantısı
+try:
+    docker_client = docker.from_env()
+except Exception:
+    docker_client = None
+
+# --- SİBER GÜVENLİK VE NIDS SENSÖRLERİ ---
 
 def parse_nvme_smart(output):
     data = {'temp': 0.0, 'spare': 0.0, 'used': 0.0, 'read_tb': 0.0, 'write_tb': 0.0, 'power_cycles': 0, 'power_on_hours': 0, 'unsafe_shutdowns': 0, 'media_errors': 0}
     for line in output.split('\n'):
-        # Tüm gereksiz boşlukları ve virgülleri baştan temizle
-        clean_line = line.strip().replace(',', '')
-        
+        if not line.strip(): continue
         try:
-            if clean_line.startswith('Temperature:'): 
-                # Örnek: "Temperature: 45 Celsius"
-                data['temp'] = float(clean_line.split(':')[1].strip().split()[0])
-            elif clean_line.startswith('Available Spare:'): 
-                # Örnek: "Available Spare: 100%"
-                data['spare'] = float(clean_line.split(':')[1].strip().replace('%', ''))
-            elif clean_line.startswith('Percentage Used:'): 
-                # Örnek: "Percentage Used: 1%"
-                data['used'] = float(clean_line.split(':')[1].strip().replace('%', ''))
-            elif clean_line.startswith('Data Units Read:'):
-                # Örnek: "Data Units Read: 3010647 [1.54 TB]"
-                tb_part = clean_line.split('[')[1].split(']')[0] # "1.54 TB"
-                val = float(tb_part.split()[0])
+            if line.startswith('Temperature:'): 
+                data['temp'] = float(line.split(':')[1].strip().split()[0])
+            elif line.startswith('Available Spare:'): 
+                data['spare'] = float(line.split(':')[1].strip().replace('%', ''))
+            elif line.startswith('Percentage Used:'): 
+                data['used'] = float(line.split(':')[1].strip().replace('%', ''))
+            elif line.startswith('Data Units Read:'):
+                tb_part = line.split('[')[1].split(']')[0] 
+                val = float(tb_part.split()[0].replace(',', ''))
                 data['read_tb'] = val if "TB" in tb_part else (val / 1024.0 if "GB" in tb_part else val)
-            elif clean_line.startswith('Data Units Written:'):
-                # Örnek: "Data Units Written: 5568510 [2.85 TB]"
-                tb_part = clean_line.split('[')[1].split(']')[0] 
-                val = float(tb_part.split()[0])
+            elif line.startswith('Data Units Written:'):
+                tb_part = line.split('[')[1].split(']')[0] 
+                val = float(tb_part.split()[0].replace(',', ''))
                 data['write_tb'] = val if "TB" in tb_part else (val / 1024.0 if "GB" in tb_part else val)
-            elif clean_line.startswith('Power Cycles:'): 
-                data['power_cycles'] = int(clean_line.split(':')[1].strip())
-            elif clean_line.startswith('Power On Hours:'): 
-                data['power_on_hours'] = int(clean_line.split(':')[1].strip())
-            elif clean_line.startswith('Unsafe Shutdowns:'): 
-                data['unsafe_shutdowns'] = int(clean_line.split(':')[1].strip())
-            elif clean_line.startswith('Media and Data Integrity Errors:'): 
-                data['media_errors'] = int(clean_line.split(':')[1].strip())
-        except Exception as e:
-            # Okuma hatası olursa pas geç (0 kalır)
+            elif line.startswith('Power Cycles:'): 
+                data['power_cycles'] = int(line.split(':')[1].replace(',', '').strip())
+            elif line.startswith('Power On Hours:'): 
+                data['power_on_hours'] = int(line.split(':')[1].replace(',', '').strip())
+            elif line.startswith('Unsafe Shutdowns:'): 
+                data['unsafe_shutdowns'] = int(line.split(':')[1].replace(',', '').strip())
+            elif line.startswith('Media and Data Integrity Errors:'): 
+                data['media_errors'] = int(line.split(':')[1].replace(',', '').strip())
+        except Exception:
             pass
     return data
 
@@ -82,13 +82,19 @@ def get_smart_disk_health():
     try:
         devices = set()
         for part in psutil.disk_partitions(all=False):
-            if part.device.startswith('/dev/sd') or part.device.startswith('/dev/nvme'):
-                devices.add(part.device.rstrip('0123456789p'))
+            # Regex ile diskin tam kök adını hatasız yakalıyoruz (Örn: /dev/sda veya /dev/nvme0n1)
+            match = re.match(r'^(/dev/(sd[a-z]|nvme\d+n\d+))', part.device)
+            if match:
+                devices.add(match.group(1))
         
         for dev in devices:
             res_a = subprocess.run(['smartctl', '-A', dev], capture_output=True, text=True)
             parsed = parse_nvme_smart(res_a.stdout)
-            # NVMe diskler için media error 0 ise ve spare > 10 ise PASSED kabul ediyoruz
+            
+            # Eğer değerlerin tümü sıfır dönmüşse (okuyamamışsa) durumu atla, veriyi kirletme
+            if parsed['read_tb'] == 0 and parsed['power_on_hours'] == 0:
+                continue 
+
             status = "PASSED" if parsed['media_errors'] == 0 and parsed['spare'] > 10 else "WARNING/FAILED"
             
             healths.append({
@@ -98,10 +104,10 @@ def get_smart_disk_health():
                 'power_cycles': parsed['power_cycles'], 'power_on_hours': parsed['power_on_hours'],
                 'unsafe_shutdowns': parsed['unsafe_shutdowns'], 'media_errors': parsed['media_errors']
             })
-    except Exception: pass
+    except Exception as e: 
+        print(f"SMART Okuma Hatası: {e}")
     return healths
 
-# (Diğer fonksiyonlar aynı)
 def get_open_ports():
     open_ports = []
     try:
@@ -123,6 +129,8 @@ def get_tcp_states():
             state_counts[conn.status] = state_counts.get(conn.status, 0) + 1
     except Exception: pass
     return [{'state': k, 'count': v} for k, v in state_counts.items()]
+
+# --- DİĞER SENSÖR FONKSİYONLARI ---
 
 def get_pending_updates():
     global LAST_UPDATE_CHECK_TIME, PENDING_UPDATES_COUNT
@@ -345,7 +353,7 @@ def push_metrics(stub):
                 for t in current_tcp_states: metrics.tcp_states.add(state=t['state'], count=t['count'])
                 LAST_TCP_STATES_STATE = current_tcp_states
 
-            # YENİ NVMe GÜNCELLEMESİ
+            # YENİ NVMe GÜNCELLEMESİ (Regex ve Sıfır Kontrolü ile)
             if current_smart_disks != LAST_SMART_DISK_STATE:
                 for d in current_smart_disks: 
                     metrics.smart_disk_health.add(
@@ -376,7 +384,7 @@ def push_metrics(stub):
 
             response = stub.PushMetrics(metrics)
             if response.success: 
-                print(f"[{SERVER_ID}] CPU: %{sys_cpu} | SMART NVMe ve Ağ Güvenliği İletildi.")
+                print(f"[{SERVER_ID}] CPU: %{sys_cpu} | SMART NVMe ve Ağ Güvenliği Başarıyla İletildi.")
             
         except Exception as e: print(f"Ajan içi hata: {e}")
         time.sleep(5) 
