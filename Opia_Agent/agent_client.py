@@ -7,6 +7,8 @@ import urllib.request
 import platform
 import os
 import re
+import threading 
+import queue
 
 import agent_pb2
 import agent_pb2_grpc
@@ -475,11 +477,92 @@ def push_metrics(stub):
         except Exception as e: print(f"Ajan içi hata: {e}")
         time.sleep(5) 
 
+command_result_queue = queue.Queue()
+
+def result_generator():
+    """Kuyruktaki komut cevaplarını okuyup tünelden yukarı (C# tarafına) fırlatan jeneratör."""
+    while True:
+        result = command_result_queue.get()
+        if result is None:
+            break
+        yield result
+
+def listen_for_commands(stub):
+    """C# sunucusundan gelen tüneli dinler ve komutları çalıştırır."""
+    print(f"[{SERVER_ID}] Komut tüneli (CommandStream) açılıyor...")
+    # C# tarafındaki ServerId kontrolünü geçmek için Metadata (Header) ekliyoruz
+    metadata = (('server-id', SERVER_ID),)
+    
+    try:
+        # Tüneli başlat (Hem okuma hem yazma yapar)
+        responses = stub.CommandStream(result_generator(), metadata=metadata)
+        
+        # Merkezden bir komut geldiğinde bu döngü tetiklenir
+        for request in responses:
+            print(f"\n[EMİR GELDİ] Komut: '{request.command}' (ID: {request.command_id})")
+            try:
+                # Komutu Fedora terminalinde gerçek zamanlı çalıştır
+                process = subprocess.run(
+                    request.command, 
+                    shell=True, 
+                    capture_output=True, 
+                    text=True, 
+                    timeout=30 # Komut 30 saniyeden uzun sürerse iptal et (Sonsuz döngüleri engeller)
+                )
+                
+                # Çıktıyı al (Eğer hata varsa error logunu al)
+                output = process.stdout if process.stdout else process.stderr
+                
+                # Bazen komutlar başarıyla çalışır ama çıktı vermez (Örn: 'mkdir test')
+                if not output and process.returncode == 0:
+                    output = "Komut başarıyla çalıştırıldı (Terminal çıktısı yok)."
+                    
+                result = agent_pb2.CommandResult(
+                    server_id=SERVER_ID,
+                    command_id=request.command_id,
+                    output=output.strip(),
+                    exit_code=process.returncode
+                )
+            except subprocess.TimeoutExpired:
+                result = agent_pb2.CommandResult(
+                    server_id=SERVER_ID,
+                    command_id=request.command_id,
+                    output="Hata: Komut zaman aşımına uğradı (30 saniye limiti aşıldı).",
+                    exit_code=-1
+                )
+            except Exception as e:
+                result = agent_pb2.CommandResult(
+                    server_id=SERVER_ID,
+                    command_id=request.command_id,
+                    output=f"Ajan İçi Çalıştırma Hatası: {str(e)}",
+                    exit_code=-1
+                )
+            
+            # Sonucu C# sunucusuna gitmesi için sıraya ekle
+            command_result_queue.put(result)
+            print(f"[EMİR TAMAMLANDI] Sonuç merkeze iletildi.\n")
+            
+    except Exception as e:
+        print(f"[TÜNEL KOPTU] Komut dinleme servisi hatası: {e}")
+
+
 def run():
-    print(f"Merkeze bağlanılıyor...")
-    with grpc.insecure_channel(SERVER_ADDRESS) as channel:
-        stub = agent_pb2_grpc.ServerManagerStub(channel)
-        push_metrics(stub)
+    print(f"[{SERVER_ID}] Merkeze bağlanılıyor...")
+    while True:
+        try:
+            with grpc.insecure_channel(SERVER_ADDRESS) as channel:
+                stub = agent_pb2_grpc.ServerManagerStub(channel)
+                
+                # Komut dinleme işini arka planda ayrı bir Thread (İş parçacığı) olarak başlat
+                command_thread = threading.Thread(target=listen_for_commands, args=(stub,), daemon=True)
+                command_thread.start()
+                
+                # Metrik gönderme işini ana Thread'de çalıştır (Sonsuz döngü)
+                push_metrics(stub)
+                
+        except Exception as e:
+            print(f"Bağlantı koptu veya merkez kapalı: {e}. 5 saniye içinde tekrar denenecek...")
+            time.sleep(5)
 
 if __name__ == '__main__':
     run()
