@@ -31,6 +31,13 @@ LAST_OPEN_PORTS_STATE = []
 LAST_TCP_STATES_STATE = []
 LAST_SMART_DISK_STATE = []
 
+# Yeni Enterprise Hafızalar
+LAST_OOM_STATE = []
+LAST_FAILED_SERVICES_STATE = []
+LAST_TIME_SYNC_STATE = None
+LAST_RO_FS_STATE = []
+LAST_SSL_STATE = []
+
 # Hız ve zaman hesaplamaları için
 LAST_DISK_IO = None
 LAST_NET_IO = None
@@ -44,19 +51,80 @@ try:
 except Exception:
     docker_client = None
 
-# --- SİBER GÜVENLİK VE NIDS SENSÖRLERİ ---
+# --- ENTERPRISE SENSÖRLERİ (YENİ) ---
+
+def get_failed_services():
+    try:
+        res = subprocess.run(['systemctl', 'list-units', '--state=failed', '--no-legend', '--plain'], capture_output=True, text=True)
+        return [line.split()[0] for line in res.stdout.split('\n') if '.service' in line]
+    except Exception: return []
+
+def get_oom_kills():
+    try:
+        res = subprocess.run(['journalctl', '-k', '-n', '200', '--no-pager'], capture_output=True, text=True)
+        ooms = []
+        for line in res.stdout.split('\n'):
+            if "Out of memory: Killed process" in line or ("Killed process" in line and "oom" in line.lower()):
+                msg = line.split('] ')[-1][:200]
+                proc_name = msg.split('Killed process ')[-1].split(' ')[1] if 'Killed process' in msg else 'Unknown'
+                ooms.append({'proc': proc_name, 'msg': msg})
+        return ooms
+    except Exception: return []
+
+def get_ro_filesystems():
+    ro_fs = []
+    try:
+        with open('/proc/mounts', 'r') as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 4 and parts[0].startswith('/dev/') and parts[2] in ['ext4', 'xfs', 'btrfs']:
+                    if 'ro' in parts[3].split(','):
+                        ro_fs.append({'mount': parts[1], 'fs': parts[2]})
+    except Exception: pass
+    return ro_fs
+
+def get_time_sync():
+    sync_info = {'synced': False, 'drift_ms': 0.0}
+    try:
+        res1 = subprocess.run(['timedatectl', 'show'], capture_output=True, text=True)
+        if "NTPSynchronized=yes" in res1.stdout: sync_info['synced'] = True
+        
+        res2 = subprocess.run(['chronyc', 'tracking'], capture_output=True, text=True)
+        for line in res2.stdout.split('\n'):
+            if "System time" in line and ("fast" in line or "slow" in line):
+                drift_sec = float(line.split(':')[1].strip().split()[0])
+                sync_info['drift_ms'] = round(abs(drift_sec) * 1000.0, 3)
+    except Exception: pass
+    return sync_info
+
+def get_ssl_certs():
+    certs = []
+    le_path = '/etc/letsencrypt/live'
+    if os.path.exists(le_path):
+        try:
+            for domain in os.listdir(le_path):
+                cert_path = os.path.join(le_path, domain, 'cert.pem')
+                if os.path.exists(cert_path):
+                    res = subprocess.run(['openssl', 'x509', '-enddate', '-noout', '-in', cert_path], capture_output=True, text=True)
+                    if res.returncode == 0:
+                        date_str = res.stdout.split('=')[1].strip()
+                        res2 = subprocess.run(['date', '-d', date_str, '+%s'], capture_output=True, text=True)
+                        if res2.returncode == 0:
+                            days = int((int(res2.stdout.strip()) - time.time()) / 86400)
+                            certs.append({'domain': domain, 'days': days})
+        except Exception: pass
+    return certs
+
+# --- SİBER GÜVENLİK VE DONANIM SENSÖRLERİ ---
 
 def parse_nvme_smart(output):
     data = {'temp': 0.0, 'spare': 0.0, 'used': 0.0, 'read_tb': 0.0, 'write_tb': 0.0, 'power_cycles': 0, 'power_on_hours': 0, 'unsafe_shutdowns': 0, 'media_errors': 0}
     for line in output.split('\n'):
         if not line.strip(): continue
         try:
-            if line.startswith('Temperature:'): 
-                data['temp'] = float(line.split(':')[1].strip().split()[0])
-            elif line.startswith('Available Spare:'): 
-                data['spare'] = float(line.split(':')[1].strip().replace('%', ''))
-            elif line.startswith('Percentage Used:'): 
-                data['used'] = float(line.split(':')[1].strip().replace('%', ''))
+            if line.startswith('Temperature:'): data['temp'] = float(line.split(':')[1].strip().split()[0])
+            elif line.startswith('Available Spare:'): data['spare'] = float(line.split(':')[1].strip().replace('%', ''))
+            elif line.startswith('Percentage Used:'): data['used'] = float(line.split(':')[1].strip().replace('%', ''))
             elif line.startswith('Data Units Read:'):
                 tb_part = line.split('[')[1].split(']')[0] 
                 val = float(tb_part.split()[0].replace(',', ''))
@@ -65,16 +133,11 @@ def parse_nvme_smart(output):
                 tb_part = line.split('[')[1].split(']')[0] 
                 val = float(tb_part.split()[0].replace(',', ''))
                 data['write_tb'] = val if "TB" in tb_part else (val / 1024.0 if "GB" in tb_part else val)
-            elif line.startswith('Power Cycles:'): 
-                data['power_cycles'] = int(line.split(':')[1].replace(',', '').strip())
-            elif line.startswith('Power On Hours:'): 
-                data['power_on_hours'] = int(line.split(':')[1].replace(',', '').strip())
-            elif line.startswith('Unsafe Shutdowns:'): 
-                data['unsafe_shutdowns'] = int(line.split(':')[1].replace(',', '').strip())
-            elif line.startswith('Media and Data Integrity Errors:'): 
-                data['media_errors'] = int(line.split(':')[1].replace(',', '').strip())
-        except Exception:
-            pass
+            elif line.startswith('Power Cycles:'): data['power_cycles'] = int(line.split(':')[1].replace(',', '').strip())
+            elif line.startswith('Power On Hours:'): data['power_on_hours'] = int(line.split(':')[1].replace(',', '').strip())
+            elif line.startswith('Unsafe Shutdowns:'): data['unsafe_shutdowns'] = int(line.split(':')[1].replace(',', '').strip())
+            elif line.startswith('Media and Data Integrity Errors:'): data['media_errors'] = int(line.split(':')[1].replace(',', '').strip())
+        except Exception: pass
     return data
 
 def get_smart_disk_health():
@@ -82,21 +145,14 @@ def get_smart_disk_health():
     try:
         devices = set()
         for part in psutil.disk_partitions(all=False):
-            # Regex ile diskin tam kök adını hatasız yakalıyoruz (Örn: /dev/sda veya /dev/nvme0n1)
             match = re.match(r'^(/dev/(sd[a-z]|nvme\d+n\d+))', part.device)
-            if match:
-                devices.add(match.group(1))
+            if match: devices.add(match.group(1))
         
         for dev in devices:
             res_a = subprocess.run(['smartctl', '-A', dev], capture_output=True, text=True)
             parsed = parse_nvme_smart(res_a.stdout)
-            
-            # Eğer değerlerin tümü sıfır dönmüşse (okuyamamışsa) durumu atla, veriyi kirletme
-            if parsed['read_tb'] == 0 and parsed['power_on_hours'] == 0:
-                continue 
-
+            if parsed['read_tb'] == 0 and parsed['power_on_hours'] == 0: continue 
             status = "PASSED" if parsed['media_errors'] == 0 and parsed['spare'] > 10 else "WARNING/FAILED"
-            
             healths.append({
                 'device': dev, 'health_status': status,
                 'temp': parsed['temp'], 'spare': parsed['spare'], 'used': parsed['used'],
@@ -104,8 +160,7 @@ def get_smart_disk_health():
                 'power_cycles': parsed['power_cycles'], 'power_on_hours': parsed['power_on_hours'],
                 'unsafe_shutdowns': parsed['unsafe_shutdowns'], 'media_errors': parsed['media_errors']
             })
-    except Exception as e: 
-        print(f"SMART Okuma Hatası: {e}")
+    except Exception: pass
     return healths
 
 def get_open_ports():
@@ -129,8 +184,6 @@ def get_tcp_states():
             state_counts[conn.status] = state_counts.get(conn.status, 0) + 1
     except Exception: pass
     return [{'state': k, 'count': v} for k, v in state_counts.items()]
-
-# --- DİĞER SENSÖR FONKSİYONLARI ---
 
 def get_pending_updates():
     global LAST_UPDATE_CHECK_TIME, PENDING_UPDATES_COUNT
@@ -272,9 +325,11 @@ def get_recent_errors():
     except Exception as e: return [f"Log hatasi: {e}"]
 
 # --- ANA DÖNGÜ ---
+
 def push_metrics(stub):
     global LAST_SERVICES_STATE, LAST_ERRORS_STATE, LAST_CONTAINERS_STATE, LAST_CLOUDFLARE_STATE, LAST_DISK_STATE, LAST_OS_STATE, LAST_HW_STATE
     global LAST_NETWORK_STATE, LAST_PROCESS_STATE, LAST_SECURITY_STATE, LAST_OPEN_PORTS_STATE, LAST_TCP_STATES_STATE, LAST_SMART_DISK_STATE
+    global LAST_OOM_STATE, LAST_FAILED_SERVICES_STATE, LAST_TIME_SYNC_STATE, LAST_RO_FS_STATE, LAST_SSL_STATE
     
     while True:
         try:
@@ -295,6 +350,13 @@ def push_metrics(stub):
             current_open_ports = get_open_ports()
             current_tcp_states = get_tcp_states()
             current_smart_disks = get_smart_disk_health()
+            
+            # Enterprise verileri çek
+            current_failed_services = get_failed_services()
+            current_ooms = get_oom_kills()
+            current_ro_fs = get_ro_filesystems()
+            current_time_sync = get_time_sync()
+            current_ssl = get_ssl_certs()
 
             current_containers = []
             if docker_client:
@@ -317,8 +379,11 @@ def push_metrics(stub):
             current_errors = get_recent_errors()
             cf_data = get_cloudflare_metrics()
 
+            # --- PROTOBUF MESAJINI HAZIRLA ---
             metrics = agent_pb2.SystemMetrics(server_id=SERVER_ID, cpu_usage_percent=sys_cpu, memory_usage_percent=sys_mem.percent)
 
+            # --- DELTA KONTROLLERİ ---
+            
             os_compare_state = {k: v for k, v in current_os.items() if k not in ['uptime', 'load1', 'load5', 'load15']}
             if os_compare_state != LAST_OS_STATE:
                 metrics.os_info.CopyFrom(agent_pb2.OsInfo(os_name=current_os['os_name'], version=current_os['version'], kernel_version=current_os['kernel_version'], architecture=current_os['arch'], system_uptime_seconds=current_os['uptime'], load_avg_1m=current_os['load1'], load_avg_5m=current_os['load5'], load_avg_15m=current_os['load15'], active_users=current_os['active_users'], pending_updates=current_os['pending_updates']))
@@ -353,7 +418,6 @@ def push_metrics(stub):
                 for t in current_tcp_states: metrics.tcp_states.add(state=t['state'], count=t['count'])
                 LAST_TCP_STATES_STATE = current_tcp_states
 
-            # YENİ NVMe GÜNCELLEMESİ (Regex ve Sıfır Kontrolü ile)
             if current_smart_disks != LAST_SMART_DISK_STATE:
                 for d in current_smart_disks: 
                     metrics.smart_disk_health.add(
@@ -365,6 +429,27 @@ def push_metrics(stub):
                         media_errors=d['media_errors']
                     )
                 LAST_SMART_DISK_STATE = current_smart_disks
+
+            # Enterprise Metriklerin Eklenmesi
+            if current_ooms != LAST_OOM_STATE:
+                for o in current_ooms: metrics.oom_kills.add(process_name=o['proc'], message=o['msg'])
+                LAST_OOM_STATE = current_ooms
+
+            if current_failed_services != LAST_FAILED_SERVICES_STATE:
+                for f in current_failed_services: metrics.failed_services.add(service_name=f)
+                LAST_FAILED_SERVICES_STATE = current_failed_services
+
+            if current_time_sync != LAST_TIME_SYNC_STATE:
+                metrics.time_sync.CopyFrom(agent_pb2.TimeSyncInfo(ntp_synchronized=current_time_sync['synced'], drift_milliseconds=current_time_sync['drift_ms']))
+                LAST_TIME_SYNC_STATE = current_time_sync
+
+            if current_ro_fs != LAST_RO_FS_STATE:
+                for r in current_ro_fs: metrics.read_only_fs.add(mount_point=r['mount'], file_system=r['fs'])
+                LAST_RO_FS_STATE = current_ro_fs
+
+            if current_ssl != LAST_SSL_STATE:
+                for s in current_ssl: metrics.ssl_certificates.add(domain_name=s['domain'], days_remaining=s['days'])
+                LAST_SSL_STATE = current_ssl
 
             if current_containers != LAST_CONTAINERS_STATE:
                 for c in current_containers: metrics.containers.add(container_id=c['id'], name=c['name'], state=c['state'], health=c['health'], cpu_percent=c['cpu'], memory_mb=c['mem'])
@@ -382,9 +467,10 @@ def push_metrics(stub):
                 metrics.cloudflare.CopyFrom(agent_pb2.CloudflareInfo(total_requests=cf_data['total'], successful_requests=cf_data['success'], server_errors=cf_data['error'], active_sessions=cf_data['sessions'], latency_ms=cf_data['latency'], bytes_received=cf_data['recv'], bytes_sent=cf_data['sent']))
                 LAST_CLOUDFLARE_STATE = cf_data
 
+            # Merkeze Gönder
             response = stub.PushMetrics(metrics)
             if response.success: 
-                print(f"[{SERVER_ID}] CPU: %{sys_cpu} | SMART NVMe ve Ağ Güvenliği Başarıyla İletildi.")
+                print(f"[{SERVER_ID}] Tüm Enterprise Metrikleri (OOM, NTP, Çöken Servisler) Başarıyla İletildi.")
             
         except Exception as e: print(f"Ajan içi hata: {e}")
         time.sleep(5) 
