@@ -2,8 +2,6 @@ pipeline {
     agent any
 
     environment {
-        // Tam dosya yolu (WORKSPACE) yerine göreceli yol kullanıyoruz
-        // Bu sayede job ismindeki boşluklar sorun yaratmaz
         VENV_DIR    = 'venv'
         PYTHON_BIN  = 'venv/bin/python'
         PIP_BIN     = 'venv/bin/pip'
@@ -12,7 +10,6 @@ pipeline {
     stages {
         stage('Sanal Ortam Hazırlığı') {
             steps {
-                // Kodların bulunduğu alt klasöre giriyoruz
                 dir('Opia_Agent') {
                     script {
                         sh """
@@ -20,7 +17,6 @@ pipeline {
                             python3 -m venv ${VENV_DIR}
                         fi
                         """
-                        // Göreceli yollarla komutları çalıştırıyoruz
                         sh "./${PIP_BIN} install -r requirements.txt"
                     }
                 }
@@ -44,13 +40,29 @@ pipeline {
 
                         echo 'Yeni Opia Agent başlatılıyor...'
                         
+                        // Sudo güvenliği için pwd ile mutlak yolu alıyoruz
                         sh """
                         export BUILD_ID=dontKillMe
-                        nohup sudo ./${PYTHON_BIN} agent_client.py > agent_activity.log 2>&1 &
+                        FULL_PATH=\$(pwd)
+                        nohup sudo \${FULL_PATH}/venv/bin/python agent_client.py > agent_activity.log 2>&1 &
                         """
                         
-                        sh "sleep 2"
-                        sh "pgrep -f agent_client.py && echo 'Opia Agent başarıyla arka planda çalışıyor.'"
+                        // Ajanın log yazmasına izin vermek için biraz süre tanıyalım
+                        sh "sleep 3"
+                        
+                        // HATA AYIKLAMA: Süreç başlamadıysa log dosyasını doğrudan Jenkins konsoluna bas
+                        sh """
+                        if pgrep -f agent_client.py > /dev/null; then
+                            echo 'Opia Agent başarıyla arka planda çalışıyor.'
+                        else
+                            echo '##################################################'
+                            echo '   HATA: Opia Agent başlatılamadı! LOG ÇIKTISI:'
+                            echo '##################################################'
+                            cat agent_activity.log || echo 'Log dosyası okunamadı.'
+                            echo '##################################################'
+                            exit 1
+                        fi
+                        """
                     }
                 }
             }
