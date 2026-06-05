@@ -1,37 +1,4 @@
-pipeline {
-    agent any
-
-    environment {
-        VENV_DIR    = 'venv'
-        PYTHON_BIN  = 'venv/bin/python'
-        PIP_BIN     = 'venv/bin/pip'
-    }
-
-    stages {
-        stage('Sanal Ortam Hazırlığı') {
-            steps {
-                dir('Opia_Agent') {
-                    script {
-                        sh """
-                        if [ ! -d "${VENV_DIR}" ]; then
-                            python3 -m venv ${VENV_DIR}
-                        fi
-                        """
-                        sh "./${PIP_BIN} install -r requirements.txt"
-                    }
-                }
-            }
-        }
-
-        stage('gRPC Prototip Derleme') {
-            steps {
-                dir('Opia_Agent') {
-                    sh "./${PYTHON_BIN} -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. agent.proto"
-                }
-            }
-        }
-
-       stage('Ajanı Arka Planda Başlat') {
+stage('Ajanı Arka Planda Başlat') {
             steps {
                 dir('Opia_Agent') {
                     script {
@@ -66,10 +33,3 @@ pipeline {
                 }
             }
         }
-
-    post {
-        always {
-            echo 'Pipeline tamamlandı.'
-        }
-    }
-}
