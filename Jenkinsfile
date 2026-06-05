@@ -2,54 +2,56 @@ pipeline {
     agent any
 
     environment {
-        // Sanal ortam yollarını Jenkins workspace'ine göre dinamik tanımlıyoruz
+        // Tam dosya yolu (WORKSPACE) yerine göreceli yol kullanıyoruz
+        // Bu sayede job ismindeki boşluklar sorun yaratmaz
         VENV_DIR    = 'venv'
-        PYTHON_BIN  = "${WORKSPACE}/venv/bin/python"
-        PIP_BIN     = "${WORKSPACE}/venv/bin/pip"
+        PYTHON_BIN  = 'venv/bin/python'
+        PIP_BIN     = 'venv/bin/pip'
     }
 
     stages {
         stage('Sanal Ortam Hazırlığı') {
             steps {
-                script {
-                    // Eğer venv klasörü yoksa oluştur, varsa geç
-                    sh """
-                    if [ ! -d "${VENV_DIR}" ]; then
-                        python3 -m venv ${VENV_DIR}
-                    fi
-                    """
-                    // Bağımlılıkları sanal ortama yükle
-                    sh "${PIP_BIN} install -r requirements.txt"
+                // Kodların bulunduğu alt klasöre giriyoruz
+                dir('Opia_Agent') {
+                    script {
+                        sh """
+                        if [ ! -d "${VENV_DIR}" ]; then
+                            python3 -m venv ${VENV_DIR}
+                        fi
+                        """
+                        // Göreceli yollarla komutları çalıştırıyoruz
+                        sh "./${PIP_BIN} install -r requirements.txt"
+                    }
                 }
             }
         }
 
         stage('gRPC Prototip Derleme') {
             steps {
-                // gRPC stub dosyalarını oluştur
-                sh "${PYTHON_BIN} -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. agent.proto"
+                dir('Opia_Agent') {
+                    sh "./${PYTHON_BIN} -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. agent.proto"
+                }
             }
         }
 
         stage('Ajanı Arka Planda Başlat') {
             steps {
-                script {
-                    echo 'Eski ajan süreçleri temizleniyor...'
-                    // Eğer halihazırda çalışan eski bir süreç varsa durduruyoruz
-                    sh "pkill -f agent_client.py || true"
+                dir('Opia_Agent') {
+                    script {
+                        echo 'Eski ajan süreçleri temizleniyor...'
+                        sh "pkill -f agent_client.py || true"
 
-                    echo 'Yeni Opia Agent başlatılıyor...'
-                    
-                    // Jenkins, pipeline bittiğinde başlattığı alt süreçleri otomatik öldürür.
-                    // Bunu engellemek ve ajanın kalıcı olması için BUILD_ID'yi geçici olarak değiştiriyoruz.
-                    sh """
-                    export BUILD_ID=dontKillMe
-                    nohup sudo ${PYTHON_BIN} agent_client.py > agent_activity.log 2>&1 &
-                    """
-                    
-                    // Ajanın ayağa kalkması için 2 saniye bekleyip kontrol edelim
-                    sh "sleep 2"
-                    sh "pgrep -f agent_client.py && echo 'Opia Agent başarıyla arka planda çalışıyor.'"
+                        echo 'Yeni Opia Agent başlatılıyor...'
+                        
+                        sh """
+                        export BUILD_ID=dontKillMe
+                        nohup sudo ./${PYTHON_BIN} agent_client.py > agent_activity.log 2>&1 &
+                        """
+                        
+                        sh "sleep 2"
+                        sh "pgrep -f agent_client.py && echo 'Opia Agent başarıyla arka planda çalışıyor.'"
+                    }
                 }
             }
         }
@@ -57,7 +59,6 @@ pipeline {
 
     post {
         always {
-            // Workspace temizliği yaparken venv ve üretilen logları koruyoruz
             echo 'Pipeline tamamlandı.'
         }
     }
