@@ -490,7 +490,6 @@ def result_generator():
 def listen_for_commands(stub):
     """C# sunucusundan gelen tüneli dinler ve komutları çalıştırır."""
     print(f"[{SERVER_ID}] Komut tüneli (CommandStream) açılıyor...")
-    # C# tarafındaki ServerId kontrolünü geçmek için Metadata (Header) ekliyoruz
     metadata = (('server-id', SERVER_ID),)
     
     try:
