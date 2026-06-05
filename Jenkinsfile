@@ -31,26 +31,25 @@ pipeline {
             }
         }
 
-        stage('Ajanı Arka Planda Başlat') {
+       stage('Ajanı Arka Planda Başlat') {
             steps {
                 dir('Opia_Agent') {
                     script {
                         echo 'Eski ajan süreçleri temizleniyor...'
-                        sh "pkill -f agent_client.py || true"
+                        // pkill için sudo ekliyoruz ki root ile başlatılan eski ajanı kapatabilsin
+                        sh "sudo pkill -f agent_client.py || true"
 
                         echo 'Yeni Opia Agent başlatılıyor...'
                         
-                        // Sudo güvenliği için pwd ile mutlak yolu alıyoruz
+                        // DİKKAT: FULL_PATH değişkenini çift tırnak içine aldık!
                         sh """
                         export BUILD_ID=dontKillMe
                         FULL_PATH=\$(pwd)
-                        nohup sudo \${FULL_PATH}/venv/bin/python agent_client.py > agent_activity.log 2>&1 &
+                        nohup sudo "\${FULL_PATH}/venv/bin/python" agent_client.py > agent_activity.log 2>&1 &
                         """
                         
-                        // Ajanın log yazmasına izin vermek için biraz süre tanıyalım
                         sh "sleep 3"
                         
-                        // HATA AYIKLAMA: Süreç başlamadıysa log dosyasını doğrudan Jenkins konsoluna bas
                         sh """
                         if pgrep -f agent_client.py > /dev/null; then
                             echo 'Opia Agent başarıyla arka planda çalışıyor.'
@@ -67,7 +66,6 @@ pipeline {
                 }
             }
         }
-    }
 
     post {
         always {
